@@ -1,0 +1,1 @@
+"""SoundFlix application package."""

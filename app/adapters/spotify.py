@@ -1,0 +1,98 @@
+"""Spotify adapter using Authorization Code + PKCE and the current Web API."""
+from __future__ import annotations
+from urllib.parse import urlencode
+import time
+import requests
+import spotipy
+from app.config import settings
+from app.models import Artist, PlaylistResult, Track
+from app.services.token_store import TokenStore
+from .base import BaseMusicAdapter
+from .oauth import OAuthCallback, PKCE
+import secrets
+
+
+class SpotifyAdapter(BaseMusicAdapter):
+    name = "Spotify"
+    API = "https://api.spotify.com/v1"
+
+    def __init__(self) -> None:
+        self.tokens = TokenStore()
+        self.session = requests.Session()
+        self.access_token: str | None = None
+        self.client: spotipy.Spotify | None = None
+
+    def authenticate(self, log) -> None:
+        if not settings.spotify_client_id:
+            raise RuntimeError("Set SPOTIFY_CLIENT_ID in .env before logging in.")
+        cached = self.tokens.load("spotify")
+        if cached and cached.get("expires_at", 0) > time.time() + 30:
+            self._set_access_token(cached["access_token"]); log("Spotify session restored from secure storage."); return
+        if cached and cached.get("refresh_token"):
+            response = requests.post("https://accounts.spotify.com/api/token", data={
+                "grant_type": "refresh_token", "refresh_token": cached["refresh_token"],
+                "client_id": settings.spotify_client_id,
+            }, timeout=20)
+            if response.ok:
+                payload = response.json()
+                payload["refresh_token"] = payload.get("refresh_token", cached["refresh_token"])
+                self._save(payload); log("Spotify access token refreshed."); return
+        pkce, state = PKCE.create(), secrets.token_urlsafe(24)
+        params = {
+            "client_id": settings.spotify_client_id, "response_type": "code",
+            "redirect_uri": settings.spotify_redirect_uri, "state": state,
+            "scope": "playlist-modify-private playlist-modify-public",
+            "code_challenge_method": "S256", "code_challenge": pkce.challenge,
+        }
+        log("Opening Spotify authorization in your browser…")
+        code = OAuthCallback(settings.spotify_redirect_uri, state).authorize(
+            "https://accounts.spotify.com/authorize?" + urlencode(params))
+        response = requests.post("https://accounts.spotify.com/api/token", data={
+            "client_id": settings.spotify_client_id, "grant_type": "authorization_code",
+            "code": code, "redirect_uri": settings.spotify_redirect_uri, "code_verifier": pkce.verifier,
+        }, timeout=20)
+        response.raise_for_status(); self._save(response.json()); log("Spotify authenticated.")
+
+    def _save(self, payload: dict) -> None:
+        payload["expires_at"] = time.time() + int(payload.get("expires_in", 3600))
+        self.tokens.save("spotify", payload); self._set_access_token(payload["access_token"])
+
+    def _set_access_token(self, value: str) -> None:
+        """Use spotipy for catalog operations; direct REST remains for changed playlist endpoints."""
+        self.access_token = value
+        self.client = spotipy.Spotify(auth=value, requests_timeout=25, retries=0)
+
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        if not self.access_token:
+            raise RuntimeError("Spotify is not authenticated.")
+        response = self.session.request(method, self.API + path, headers={
+            "Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}, timeout=25, **kwargs)
+        if response.status_code == 429:
+            raise RuntimeError(f"Spotify rate limit reached; retry after {response.headers.get('Retry-After', 'a short wait')} seconds.")
+        if response.status_code == 401:
+            raise RuntimeError("Spotify session expired; press Login again.")
+        response.raise_for_status()
+        return response
+
+    def search_artist(self, query: str) -> Artist | None:
+        if not self.client:
+            raise RuntimeError("Spotify is not authenticated.")
+        items = self.client.search(q=query, type="artist", limit=5).get("artists", {}).get("items", [])
+        # Exact display-name match wins over Spotify's relevance ordering.
+        match = next((x for x in items if x["name"].casefold() == query.casefold()), items[0] if items else None)
+        return Artist(match["id"], match["name"], match) if match else None
+
+    def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        # /artists/{id}/top-tracks was removed in 2026. Rank artist-constrained search tracks instead.
+        if not self.client:
+            raise RuntimeError("Spotify is not authenticated.")
+        data = self.client.search(q=f"artist:{artist.name}", type="track", limit=10)
+        candidates = [x for x in data.get("tracks", {}).get("items", []) if any(a["id"] == artist.id for a in x.get("artists", []))]
+        candidates.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+        return [Track(x["id"], x["name"], ", ".join(a["name"] for a in x["artists"]), x["uri"], x.get("popularity"), x) for x in candidates[:limit]]
+
+    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
+        playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": "Created by SoundFlix"}).json()
+        for offset in range(0, len(tracks), 100):
+            self._request("POST", f"/playlists/{playlist['id']}/items", json={"uris": [t.uri for t in tracks[offset:offset + 100]]})
+        return PlaylistResult(name, playlist.get("external_urls", {}).get("spotify"), len(tracks))
