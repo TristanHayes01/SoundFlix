@@ -91,6 +91,29 @@ class SpotifyAdapter(BaseMusicAdapter):
         candidates.sort(key=lambda x: x.get("popularity", 0), reverse=True)
         return [Track(x["id"], x["name"], ", ".join(a["name"] for a in x["artists"]), x["uri"], x.get("popularity"), x) for x in candidates[:limit]]
 
+    def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        """Collect tracks from the artist's latest albums and singles, newest first."""
+        if not self.client:
+            raise RuntimeError("Spotify is not authenticated.")
+        # Spotify caps this endpoint at 10 per page; its default order is newest releases first.
+        releases = self.client.artist_albums(artist.id, album_type="album,single", limit=10).get("items", [])
+        releases.sort(key=lambda album: album.get("release_date", ""), reverse=True)
+        found: list[Track] = []
+        seen: set[str] = set()
+        for album in releases:
+            tracks = self.client.album_tracks(album["id"], limit=50).get("items", [])
+            # Album tracks inherit the album release date. Reverse numerical order makes a
+            # same-day release deterministic while newer albums still take priority.
+            tracks.sort(key=lambda track: (track.get("disc_number", 0), track.get("track_number", 0)), reverse=True)
+            for track in tracks:
+                if track["id"] in seen:
+                    continue
+                found.append(Track(track["id"], track["name"], ", ".join(a["name"] for a in track["artists"]), track["uri"], None, track))
+                seen.add(track["id"])
+                if len(found) == limit:
+                    return found
+        return found
+
     def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
         playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": "Created by SoundFlix"}).json()
         for offset in range(0, len(tracks), 100):

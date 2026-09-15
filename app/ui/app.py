@@ -35,6 +35,7 @@ class FlyerPlaylistApp(ctk.CTk):
         self.token_store = TokenStore()
         saved = self.token_store.load("preferences") or {}
         self.top_song_count = ctk.StringVar(value=str(saved.get("songs_per_artist", 5)))
+        self.track_source = ctk.StringVar(value=saved.get("track_source", "Most popular songs"))
         self.auth_buttons: list[ctk.CTkButton] = []
         self.service_status: dict[str, ctk.CTkLabel] = {}
         self.connection_state: dict[str, bool | None] = {name: False for name in ADAPTERS}
@@ -99,9 +100,15 @@ class FlyerPlaylistApp(ctk.CTk):
         ctk.CTkOptionMenu(count_frame, values=[str(n) for n in range(1, 11)], variable=self.top_song_count, command=self._save_song_preference).pack(side="left", padx=8)
         ctk.CTkLabel(count_frame, text="Spotify catalog search currently returns up to 10 ranked matches.").pack(side="left", padx=8)
 
-        ctk.CTkLabel(parent, text="Streaming services", font=ctk.CTkFont(size=17, weight="bold")).grid(row=2, column=0, padx=20, pady=(18, 4), sticky="w")
+        source_frame = ctk.CTkFrame(parent)
+        source_frame.grid(row=2, column=0, padx=20, pady=8, sticky="ew")
+        ctk.CTkLabel(source_frame, text="Tracks to add").pack(side="left", padx=14, pady=14)
+        ctk.CTkOptionMenu(source_frame, values=["Most popular songs", "Most recent releases"], variable=self.track_source, command=self._save_song_preference).pack(side="left", padx=8)
+        ctk.CTkLabel(source_frame, text="The selected song count applies to either source.").pack(side="left", padx=8)
+
+        ctk.CTkLabel(parent, text="Streaming services", font=ctk.CTkFont(size=17, weight="bold")).grid(row=3, column=0, padx=20, pady=(18, 4), sticky="w")
         services = ctk.CTkFrame(parent)
-        services.grid(row=3, column=0, padx=20, pady=(0, 20), sticky="ew")
+        services.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="ew")
         services.grid_columnconfigure(1, weight=1)
         for row, platform in enumerate(ADAPTERS):
             ctk.CTkLabel(services, text=platform, width=125, anchor="w").grid(row=row, column=0, padx=14, pady=10, sticky="w")
@@ -114,11 +121,14 @@ class FlyerPlaylistApp(ctk.CTk):
             logout.grid(row=row, column=3, padx=(5, 14), pady=10)
             self.auth_buttons.append(login)
 
-        ctk.CTkLabel(parent, text="Logout removes this app's local session. Apple Music's user token remains in .env until you remove it there.", wraplength=760, justify="left").grid(row=4, column=0, padx=20, pady=(0, 20), sticky="w")
+        ctk.CTkLabel(parent, text="Logout removes this app's local session. Apple Music's user token remains in .env until you remove it there.", wraplength=760, justify="left").grid(row=5, column=0, padx=20, pady=(0, 20), sticky="w")
 
     def _save_song_preference(self, _value: str | None = None) -> None:
-        self.token_store.save("preferences", {"songs_per_artist": int(self.top_song_count.get())})
-        self._log(f"Will add up to {self.top_song_count.get()} song(s) per artist.")
+        self.token_store.save("preferences", {
+            "songs_per_artist": int(self.top_song_count.get()),
+            "track_source": self.track_source.get(),
+        })
+        self._log(f"Will add up to {self.top_song_count.get()} {self.track_source.get().lower()} per artist.")
 
     def _selected_platform_changed(self, *_args) -> None:
         self._refresh_selected_indicator()
@@ -303,6 +313,7 @@ class FlyerPlaylistApp(ctk.CTk):
             return
         platform = self.platform.get()
         songs_per_artist = int(self.top_song_count.get())
+        track_source = "recent" if self.track_source.get() == "Most recent releases" else "popular"
         def task():
             adapter = self._adapter()
             try:
@@ -311,7 +322,8 @@ class FlyerPlaylistApp(ctk.CTk):
                 self.after(0, lambda: self._set_service_state(platform, False, "Login required"))
                 raise
             self.after(0, lambda: self._set_service_state(platform, True))
-            result = PlaylistBuilder(adapter, self._log).build(artists, name, songs_per_artist)
+            result = PlaylistBuilder(adapter, self._log).build(artists, name, songs_per_artist, track_source)
             url = f" Open it: {result.url}" if result.url else ""
             self._log(f"Done — created '{result.name}' with {result.track_count} tracks.{url}")
-        self._worker(f"Creating {platform} playlist from {len(artists)} artist(s), up to {songs_per_artist} each…", task)
+        source_name = "recent releases" if track_source == "recent" else "popular songs"
+        self._worker(f"Creating {platform} playlist from {len(artists)} artist(s), up to {songs_per_artist} {source_name} each…", task)

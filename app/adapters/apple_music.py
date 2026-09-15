@@ -72,6 +72,35 @@ class AppleMusicAdapter(BaseMusicAdapter):
                      if artist.name.casefold() in x["attributes"].get("artistName", "").casefold()][:limit]
         return [Track(x["id"], x["attributes"]["name"], x["attributes"]["artistName"], x["id"], None, x) for x in songs[:limit]]
 
+    def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        """Take songs from the artist's newest catalog albums, newest release first."""
+        try:
+            releases = self._request("GET", f"/catalog/{settings.apple_storefront}/artists/{artist.id}/albums", params={"limit": 25}).json().get("data", [])
+            releases.sort(key=lambda album: album.get("attributes", {}).get("releaseDate", ""), reverse=True)
+            songs: list[dict] = []
+            seen: set[str] = set()
+            for album in releases:
+                album_songs = self._request("GET", f"/catalog/{settings.apple_storefront}/albums/{album['id']}/tracks", params={"limit": 100}).json().get("data", [])
+                for song in album_songs:
+                    if song["id"] not in seen:
+                        songs.append(song)
+                        seen.add(song["id"])
+                    if len(songs) == limit:
+                        break
+                if len(songs) == limit:
+                    break
+        except requests.HTTPError:
+            # Some storefront/catalog combinations omit the artist-albums relationship.
+            songs = []
+        if not songs:
+            search = self._request("GET", f"/catalog/{settings.apple_storefront}/search", params={
+                "term": artist.name, "types": "songs", "limit": 25,
+            }).json()
+            songs = [song for song in search.get("results", {}).get("songs", {}).get("data", [])
+                     if artist.name.casefold() in song["attributes"].get("artistName", "").casefold()]
+            songs.sort(key=lambda song: song["attributes"].get("releaseDate", ""), reverse=True)
+        return [Track(song["id"], song["attributes"]["name"], song["attributes"]["artistName"], song["id"], None, song) for song in songs[:limit]]
+
     def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
         data = self._request("POST", "/me/library/playlists", json={
             "attributes": {"name": name, "description": {"standard": "Created by SoundFlix"}},

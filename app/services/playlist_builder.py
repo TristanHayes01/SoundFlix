@@ -11,7 +11,8 @@ class PlaylistBuilder:
     def __init__(self, adapter: BaseMusicAdapter, log: Log):
         self.adapter, self.log = adapter, log
 
-    def build(self, artists: list[str], playlist_name: str, songs_per_artist: int = 5) -> PlaylistResult:
+    def build(self, artists: list[str], playlist_name: str, songs_per_artist: int = 5,
+              track_source: str = "popular") -> PlaylistResult:
         selected: list[Track] = []
         seen_track_ids: set[str] = set()
         for index, artist_name in enumerate(artists, start=1):
@@ -20,7 +21,9 @@ class PlaylistBuilder:
             if not artist:
                 self.log(f"  Not found: {artist_name}")
                 continue
-            tracks = self.adapter.get_top_5_tracks(artist, songs_per_artist)
+            tracks = (self.adapter.get_recent_tracks(artist, songs_per_artist)
+                      if track_source == "recent"
+                      else self.adapter.get_top_5_tracks(artist, songs_per_artist))
             if len(tracks) < songs_per_artist:
                 self.log(f"  Only {len(tracks)} of {songs_per_artist} playable tracks available for {artist.name}.")
             for track in tracks:

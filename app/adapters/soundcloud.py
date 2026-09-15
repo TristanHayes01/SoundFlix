@@ -73,13 +73,23 @@ class SoundCloudAdapter(BaseMusicAdapter):
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         # SoundCloud exposes no global popularity endpoint. The documented track search is ranked locally.
+        candidates = self._artist_tracks(artist)
+        candidates.sort(key=lambda x: (x.get("favoritings_count", 0), x.get("playback_count", 0)), reverse=True)
+        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x) for x in candidates[:limit]]
+
+    def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        candidates = self._artist_tracks(artist)
+        # SoundCloud's created_at is ISO 8601 and therefore sorts safely as text.
+        candidates.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x) for x in candidates[:limit]]
+
+    def _artist_tracks(self, artist: Artist) -> list[dict]:
+        """Return this user's playable tracks once; callers decide their ranking policy."""
         payload = self._request("GET", "/tracks", params={
             "q": artist.name, "user_id": artist.id, "access": "playable", "limit": 100,
         }).json()
         items = payload.get("collection", payload) if isinstance(payload, dict) else payload
-        candidates = [x for x in items if str(x.get("user_id")) == artist.id and x.get("streamable", True)]
-        candidates.sort(key=lambda x: (x.get("favoritings_count", 0), x.get("playback_count", 0)), reverse=True)
-        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x) for x in candidates[:limit]]
+        return [x for x in items if str(x.get("user_id")) == artist.id and x.get("streamable", True)]
 
     def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
         payload = {"playlist": {

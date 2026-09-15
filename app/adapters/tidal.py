@@ -68,6 +68,32 @@ class TidalAdapter(BaseMusicAdapter):
             raise RuntimeError("Installed tidalapi lacks an artist top-tracks method; update tidalapi.")
         return [Track(str(t.id), t.name, artist.name, str(t.id), getattr(t, "popularity", None), t) for t in entries]
 
+    def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        """Use the artist's albums and EP/singles, ordered by their release date."""
+        self._require_login()
+        albums_method = getattr(artist.raw, "get_albums", None)
+        singles_method = getattr(artist.raw, "get_ep_singles", None)
+        if not albums_method:
+            raise RuntimeError("Installed tidalapi lacks artist release methods; update tidalapi.")
+        releases = list(albums_method(limit=50))
+        if singles_method:
+            releases.extend(singles_method(limit=50))
+        # `release_date` is a date/datetime in current tidalapi releases; str also handles
+        # older wrapper versions that return an ISO string or a missing value.
+        releases.sort(key=lambda album: str(getattr(album, "release_date", None) or getattr(album, "available_release_date", None) or ""), reverse=True)
+        found: list[Track] = []
+        seen: set[str] = set()
+        for release in releases:
+            for track in release.tracks(limit=100):
+                track_id = str(track.id)
+                if track_id in seen:
+                    continue
+                found.append(Track(track_id, track.name, artist.name, track_id, getattr(track, "popularity", None), track))
+                seen.add(track_id)
+                if len(found) == limit:
+                    return found
+        return found
+
     def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
         self._require_login()
         playlist = self.session.user.create_playlist(name, "Created by SoundFlix")

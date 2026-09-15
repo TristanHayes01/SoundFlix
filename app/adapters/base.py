@@ -18,4 +18,8 @@ class BaseMusicAdapter(ABC):
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]: ...
 
     @abstractmethod
+    def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
+        """Return the newest distinct catalog tracks for an artist, newest first."""
+
+    @abstractmethod
     def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult: ...

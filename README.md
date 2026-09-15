@@ -11,6 +11,8 @@ SoundFlix is a CustomTkinter desktop application that turns typed artist names�
 | TIDAL | tidalapi browser/device login | Uses Artist.top_tracks() and tidalapi playlist creation. |
 | Apple Music | signed developer JWT + Music User Token | Uses the catalog artist top-songs view, then catalog search as a fallback. |
 
+In **Settings**, choose whether each artist contributes their most popular songs or their most recent releases. The songs-per-artist selector applies to either choice (one to ten tracks).
+
 Spotify’s PKCE and playlist APIs are documented at [Spotify for Developers](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) and the [February 2026 migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide). SoundCloud’s OAuth 2.1 PKCE and playlist APIs are in its [API guide](https://developers.soundcloud.com/docs/api/). TIDAL’s wrapper login flow is documented by [tidalapi](https://tidalapi.netlify.app/login). Apple requires a Music User Token for library actions, and supports playlist creation via [Apple Music API](https://developer.apple.com/documentation/applemusicapi/create-a-new-library-playlist).
 
 ## Installation
