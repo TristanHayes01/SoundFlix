@@ -22,4 +22,5 @@ class BaseMusicAdapter(ABC):
         """Return the newest distinct catalog tracks for an artist, newest first."""
 
     @abstractmethod
-    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult: ...
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "",
+                        artwork: bytes | None = None) -> PlaylistResult: ...

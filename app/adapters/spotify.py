@@ -1,6 +1,7 @@
 """Spotify adapter using Authorization Code + PKCE and the current Web API."""
 from __future__ import annotations
 from urllib.parse import urlencode
+import base64
 import time
 import requests
 import spotipy
@@ -41,7 +42,7 @@ class SpotifyAdapter(BaseMusicAdapter):
         params = {
             "client_id": settings.spotify_client_id, "response_type": "code",
             "redirect_uri": settings.spotify_redirect_uri, "state": state,
-            "scope": "playlist-modify-private playlist-modify-public",
+            "scope": "playlist-modify-private playlist-modify-public ugc-image-upload",
             "code_challenge_method": "S256", "code_challenge": pkce.challenge,
         }
         log("Opening Spotify authorization in your browser…")
@@ -89,14 +90,14 @@ class SpotifyAdapter(BaseMusicAdapter):
         data = self.client.search(q=f"artist:{artist.name}", type="track", limit=10)
         candidates = [x for x in data.get("tracks", {}).get("items", []) if any(a["id"] == artist.id for a in x.get("artists", []))]
         candidates.sort(key=lambda x: x.get("popularity", 0), reverse=True)
-        return [Track(x["id"], x["name"], ", ".join(a["name"] for a in x["artists"]), x["uri"], x.get("popularity"), x) for x in candidates[:limit]]
+        return [Track(x["id"], x["name"], ", ".join(a["name"] for a in x["artists"]), x["uri"], x.get("popularity"), x, x.get("album", {}).get("release_date"), x.get("album", {}).get("album_type")) for x in candidates[:limit]]
 
     def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         """Collect tracks from the artist's latest albums and singles, newest first."""
         if not self.client:
             raise RuntimeError("Spotify is not authenticated.")
         # Spotify caps this endpoint at 10 per page; its default order is newest releases first.
-        releases = self.client.artist_albums(artist.id, album_type="album,single", limit=10).get("items", [])
+        releases = self.client.artist_albums(artist.id, album_type="album,single", country="US", limit=10).get("items", [])
         releases.sort(key=lambda album: album.get("release_date", ""), reverse=True)
         found: list[Track] = []
         seen: set[str] = set()
@@ -108,14 +109,22 @@ class SpotifyAdapter(BaseMusicAdapter):
             for track in tracks:
                 if track["id"] in seen:
                     continue
-                found.append(Track(track["id"], track["name"], ", ".join(a["name"] for a in track["artists"]), track["uri"], None, track))
+                found.append(Track(track["id"], track["name"], ", ".join(a["name"] for a in track["artists"]), track["uri"], None, track, album.get("release_date"), album.get("album_type")))
                 seen.add(track["id"])
                 if len(found) == limit:
                     return found
         return found
 
-    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
-        playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": "Created by SoundFlix"}).json()
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
+        playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": description or "Created by SoundFlix"}).json()
         for offset in range(0, len(tracks), 100):
             self._request("POST", f"/playlists/{playlist['id']}/items", json={"uris": [t.uri for t in tracks[offset:offset + 100]]})
+        if artwork:
+            # Spotify accepts base64-encoded JPEG artwork. It requires the ugc-image-upload scope.
+            response = self.session.put(f"{self.API}/playlists/{playlist['id']}/images", headers={
+                "Authorization": f"Bearer {self.access_token}", "Content-Type": "image/jpeg"},
+                data=base64.b64encode(artwork), timeout=25)
+            # Cover upload is optional; playlist creation remains successful if the scope is absent.
+            if not response.ok:
+                pass
         return PlaylistResult(name, playlist.get("external_urls", {}).get("spotify"), len(tracks))

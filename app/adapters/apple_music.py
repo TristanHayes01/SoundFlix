@@ -19,6 +19,7 @@ class AppleMusicAdapter(BaseMusicAdapter):
         self.developer_token: str | None = None
         self.user_token = settings.apple_music_user_token
         self.tokens = TokenStore()
+        self.storefront = "us"
 
     def authenticate(self, log) -> None:
         if (self.tokens.load("apple_music") or {}).get("signed_out"):
@@ -52,7 +53,7 @@ class AppleMusicAdapter(BaseMusicAdapter):
         return response
 
     def search_artist(self, query: str) -> Artist | None:
-        data = self._request("GET", f"/catalog/{settings.apple_storefront}/search", params={
+        data = self._request("GET", f"/catalog/{self.storefront}/search", params={
             "term": query, "types": "artists", "limit": 10,
         }).json()
         artists = data.get("results", {}).get("artists", {}).get("data", [])
@@ -61,26 +62,26 @@ class AppleMusicAdapter(BaseMusicAdapter):
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         # The catalog top-songs view reflects Apple Music editorial/catalog ordering when available.
-        data = self._request("GET", f"/catalog/{settings.apple_storefront}/artists/{artist.id}/view/top-songs", params={"limit": limit}).json()
+        data = self._request("GET", f"/catalog/{self.storefront}/artists/{artist.id}/view/top-songs", params={"limit": limit}).json()
         songs = data.get("data", [])
         if not songs:
             # Catalog fallback; restrict the matching results to the selected artist's name.
-            search = self._request("GET", f"/catalog/{settings.apple_storefront}/search", params={
+            search = self._request("GET", f"/catalog/{self.storefront}/search", params={
                 "term": artist.name, "types": "songs", "limit": 25,
             }).json()
             songs = [x for x in search.get("results", {}).get("songs", {}).get("data", [])
                      if artist.name.casefold() in x["attributes"].get("artistName", "").casefold()][:limit]
-        return [Track(x["id"], x["attributes"]["name"], x["attributes"]["artistName"], x["id"], None, x) for x in songs[:limit]]
+        return [Track(x["id"], x["attributes"]["name"], x["attributes"]["artistName"], x["id"], None, x, x["attributes"].get("releaseDate"), None) for x in songs[:limit]]
 
     def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         """Take songs from the artist's newest catalog albums, newest release first."""
         try:
-            releases = self._request("GET", f"/catalog/{settings.apple_storefront}/artists/{artist.id}/albums", params={"limit": 25}).json().get("data", [])
+            releases = self._request("GET", f"/catalog/{self.storefront}/artists/{artist.id}/albums", params={"limit": 25}).json().get("data", [])
             releases.sort(key=lambda album: album.get("attributes", {}).get("releaseDate", ""), reverse=True)
             songs: list[dict] = []
             seen: set[str] = set()
             for album in releases:
-                album_songs = self._request("GET", f"/catalog/{settings.apple_storefront}/albums/{album['id']}/tracks", params={"limit": 100}).json().get("data", [])
+                album_songs = self._request("GET", f"/catalog/{self.storefront}/albums/{album['id']}/tracks", params={"limit": 100}).json().get("data", [])
                 for song in album_songs:
                     if song["id"] not in seen:
                         songs.append(song)
@@ -93,17 +94,17 @@ class AppleMusicAdapter(BaseMusicAdapter):
             # Some storefront/catalog combinations omit the artist-albums relationship.
             songs = []
         if not songs:
-            search = self._request("GET", f"/catalog/{settings.apple_storefront}/search", params={
+            search = self._request("GET", f"/catalog/{self.storefront}/search", params={
                 "term": artist.name, "types": "songs", "limit": 25,
             }).json()
             songs = [song for song in search.get("results", {}).get("songs", {}).get("data", [])
                      if artist.name.casefold() in song["attributes"].get("artistName", "").casefold()]
             songs.sort(key=lambda song: song["attributes"].get("releaseDate", ""), reverse=True)
-        return [Track(song["id"], song["attributes"]["name"], song["attributes"]["artistName"], song["id"], None, song) for song in songs[:limit]]
+        return [Track(song["id"], song["attributes"]["name"], song["attributes"]["artistName"], song["id"], None, song, song["attributes"].get("releaseDate"), None) for song in songs[:limit]]
 
-    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
         data = self._request("POST", "/me/library/playlists", json={
-            "attributes": {"name": name, "description": {"standard": "Created by SoundFlix"}},
+            "attributes": {"name": name, "description": {"standard": description or "Created by SoundFlix"}},
             "relationships": {"tracks": {"data": [{"id": t.id, "type": "songs"} for t in tracks]}},
         }).json()
         playlist = data["data"][0]

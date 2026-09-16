@@ -75,13 +75,13 @@ class SoundCloudAdapter(BaseMusicAdapter):
         # SoundCloud exposes no global popularity endpoint. The documented track search is ranked locally.
         candidates = self._artist_tracks(artist)
         candidates.sort(key=lambda x: (x.get("favoritings_count", 0), x.get("playback_count", 0)), reverse=True)
-        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x) for x in candidates[:limit]]
+        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x, x.get("created_at"), "single") for x in candidates[:limit]]
 
     def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         candidates = self._artist_tracks(artist)
         # SoundCloud's created_at is ISO 8601 and therefore sorts safely as text.
         candidates.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x) for x in candidates[:limit]]
+        return [Track(str(x["id"]), x["title"], artist.name, str(x["id"]), None, x, x.get("created_at"), "single") for x in candidates[:limit]]
 
     def _artist_tracks(self, artist: Artist) -> list[dict]:
         """Return this user's playable tracks once; callers decide their ranking policy."""
@@ -91,9 +91,9 @@ class SoundCloudAdapter(BaseMusicAdapter):
         items = payload.get("collection", payload) if isinstance(payload, dict) else payload
         return [x for x in items if str(x.get("user_id")) == artist.id and x.get("streamable", True)]
 
-    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
         payload = {"playlist": {
-            "title": name, "description": "Created by SoundFlix", "sharing": "private",
+            "title": name, "description": description or "Created by SoundFlix", "sharing": "private",
             "tracks": [{"id": int(track.id)} for track in tracks],
         }}
         playlist = self._request("POST", "/playlists", json=payload).json()

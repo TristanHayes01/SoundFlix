@@ -2,6 +2,8 @@
 from __future__ import annotations
 import threading
 import traceback
+from io import BytesIO
+import csv
 from pathlib import Path
 import tkinter.filedialog as filedialog
 import customtkinter as ctk
@@ -10,10 +12,11 @@ from PIL import Image, ImageOps
 from app.adapters import ADAPTERS
 from app.config import settings
 from app.ocr.engines import BuiltInOCREngine, TesseractEngine
-from app.services.playlist_builder import PlaylistBuilder
+from app.services.playlist_builder import PlaylistBuilder, PlaylistOptions
 from app.services.text_cleaner import TextCleaner
 from app.services.token_store import TokenStore
 from .crop_dialog import CropDialog
+from .review_dialog import PlaylistReviewDialog
 
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
@@ -36,6 +39,12 @@ class FlyerPlaylistApp(ctk.CTk):
         saved = self.token_store.load("preferences") or {}
         self.top_song_count = ctk.StringVar(value=str(saved.get("songs_per_artist", 5)))
         self.track_source = ctk.StringVar(value=saved.get("track_source", "Most popular songs"))
+        self.release_window = ctk.StringVar(value=saved.get("release_window", "Any release date"))
+        self.skip_remixes = ctk.BooleanVar(value=saved.get("skip_remixes", False))
+        self.singles_only = ctk.BooleanVar(value=saved.get("singles_only", False))
+        self.dedupe_titles = ctk.BooleanVar(value=saved.get("dedupe_titles", True))
+        self.use_flyer_art = ctk.BooleanVar(value=saved.get("use_flyer_art", False))
+        self.playlist_description = ctk.StringVar(value=saved.get("playlist_description", ""))
         self.auth_buttons: list[ctk.CTkButton] = []
         self.service_status: dict[str, ctk.CTkLabel] = {}
         self.connection_state: dict[str, bool | None] = {name: False for name in ADAPTERS}
@@ -54,7 +63,7 @@ class FlyerPlaylistApp(ctk.CTk):
         ctk.CTkOptionMenu(top, values=list(ADAPTERS), variable=self.platform).grid(row=0, column=1, padx=8)
         self.ocr_option = ctk.StringVar(value="Built-in OCR (EasyOCR)")
         ctk.CTkOptionMenu(top, values=["Built-in OCR (EasyOCR)", "Tesseract OCR (system install)"], variable=self.ocr_option).grid(row=0, column=2, padx=8)
-        self.generate_button = ctk.CTkButton(top, text="Create playlist", command=self.generate); self.generate_button.grid(row=0, column=3, padx=8)
+        self.generate_button = ctk.CTkButton(top, text="Review playlist", command=self.generate); self.generate_button.grid(row=0, column=3, padx=8)
         self.selected_service_indicator = ctk.CTkLabel(top, text="Spotify: Not logged in", text_color=DISCONNECTED)
         self.selected_service_indicator.grid(row=0, column=4, padx=8)
         self.platform.trace_add("write", self._selected_platform_changed)
@@ -62,16 +71,24 @@ class FlyerPlaylistApp(ctk.CTk):
         tabs = ctk.CTkTabview(self); tabs.grid(row=1, column=0, padx=14, pady=8, sticky="nsew")
         builder_tab = tabs.add("Playlist builder")
         settings_tab = tabs.add("Settings")
+        history_tab = tabs.add("History")
         builder_tab.grid_columnconfigure((0, 1), weight=1, uniform="columns")
         builder_tab.grid_rowconfigure(0, weight=1)
 
         left = ctk.CTkFrame(builder_tab); left.grid(row=0, column=0, padx=(0, 7), pady=0, sticky="nsew")
         left.grid_columnconfigure(0, weight=1); left.grid_rowconfigure(3, weight=1)
         ctk.CTkLabel(left, text="1. Add artist names or read a flyer", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=14, pady=(14, 8), sticky="w")
-        buttons = ctk.CTkFrame(left, fg_color="transparent"); buttons.grid(row=1, column=0, padx=14, pady=(0, 8), sticky="ew")
-        ctk.CTkButton(buttons, text="Upload flyer", command=self.upload_image).pack(side="left")
-        self.crop_button = ctk.CTkButton(buttons, text="Crop text area", command=self.crop_image, state="disabled"); self.crop_button.pack(side="left", padx=8)
-        ctk.CTkButton(buttons, text="Run OCR", command=self.run_ocr).pack(side="left")
+        # Five full-width buttons cannot fit in this half of the window.  A
+        # two-row grid keeps every action visible on normal desktop widths.
+        buttons = ctk.CTkFrame(left, fg_color="transparent")
+        buttons.grid(row=1, column=0, padx=14, pady=(0, 8), sticky="ew")
+        buttons.grid_columnconfigure((0, 1, 2), weight=1, uniform="artist_actions")
+        ctk.CTkButton(buttons, text="Upload flyer", command=self.upload_image).grid(row=0, column=0, padx=(0, 5), pady=(0, 6), sticky="ew")
+        ctk.CTkButton(buttons, text="Import artists", command=self.import_artists).grid(row=0, column=1, padx=3, pady=(0, 6), sticky="ew")
+        ctk.CTkButton(buttons, text="Export artists", command=self.export_artists).grid(row=0, column=2, padx=(5, 0), pady=(0, 6), sticky="ew")
+        self.crop_button = ctk.CTkButton(buttons, text="Crop text area", command=self.crop_image, state="disabled")
+        self.crop_button.grid(row=1, column=0, columnspan=2, padx=(0, 3), sticky="ew")
+        ctk.CTkButton(buttons, text="Run OCR", command=self.run_ocr).grid(row=1, column=2, padx=(5, 0), sticky="ew")
         self.ocr_status = ctk.CTkLabel(left, text="OCR can be unreliable — review every artist before creating a playlist.", text_color=WORKING, wraplength=460, justify="left")
         self.ocr_status.grid(row=2, column=0, padx=14, pady=(0, 2), sticky="w")
         self.review = ctk.CTkTextbox(left, wrap="word"); self.review.grid(row=3, column=0, padx=14, pady=8, sticky="nsew")
@@ -89,26 +106,87 @@ class FlyerPlaylistApp(ctk.CTk):
         ctk.CTkButton(log_controls, text="Clear log", width=100, command=self.clear_log).pack(side="left", padx=8)
         self.status = ctk.CTkLabel(log_controls, text="Ready"); self.status.pack(side="left", padx=6)
         self._build_settings(settings_tab)
+        self._build_history(history_tab)
+
+    def _build_history(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1); parent.grid_rowconfigure(1, weight=1)
+        header = ctk.CTkFrame(parent, fg_color="transparent"); header.grid(row=0, column=0, padx=20, pady=(20, 8), sticky="ew")
+        ctk.CTkLabel(header, text="Playlist history", font=ctk.CTkFont(size=22, weight="bold")).pack(side="left")
+        ctk.CTkButton(header, text="Refresh", width=90, command=self.refresh_history).pack(side="right")
+        self.history_list = ctk.CTkScrollableFrame(parent)
+        self.history_list.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        self.refresh_history()
+
+    def refresh_history(self) -> None:
+        for child in self.history_list.winfo_children():
+            child.destroy()
+        history = self.token_store.load("playlist_history") or []
+        if not history:
+            ctk.CTkLabel(self.history_list, text="No SoundFlix playlists have been created yet.").pack(anchor="w", padx=8, pady=8)
+            return
+        for item in history:
+            row = ctk.CTkFrame(self.history_list)
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text=f"{item['name']}  •  {item['platform']}  •  {item['tracks']} tracks", anchor="w").pack(side="left", padx=10, pady=9)
+            if item.get("url"):
+                ctk.CTkButton(row, text="Copy link", width=80, command=lambda url=item["url"]: self._copy_text(url)).pack(side="right", padx=8)
+
+    def _copy_text(self, text: str) -> None:
+        self.clipboard_clear(); self.clipboard_append(text); self.update()
 
     def _build_settings(self, parent) -> None:
-        """Account controls are intentionally separate from the playlist-building workflow."""
+        """Build a grouped Settings view with an explicit, usable scroll area."""
         parent.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(parent, text="Settings", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
-        count_frame = ctk.CTkFrame(parent)
-        count_frame.grid(row=1, column=0, padx=20, pady=8, sticky="ew")
+        parent.grid_rowconfigure(0, weight=1)
+        content = ctk.CTkScrollableFrame(
+            parent,
+            height=520,
+            label_text="Settings",
+            scrollbar_fg_color="#303846",
+            scrollbar_button_color="#2fa572",
+            scrollbar_button_hover_color="#23865d",
+        )
+        content.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(content, text="1 · Playlist selection", font=ctk.CTkFont(size=18, weight="bold"), text_color="#7bdcb5").grid(row=0, column=0, padx=12, pady=(12, 2), sticky="w")
+        ctk.CTkLabel(content, text="Choose what SoundFlix finds for each artist. These choices are saved automatically.", text_color=DISCONNECTED).grid(row=1, column=0, padx=12, pady=(0, 8), sticky="w")
+        count_frame = ctk.CTkFrame(content)
+        count_frame.grid(row=2, column=0, padx=12, pady=5, sticky="ew")
         ctk.CTkLabel(count_frame, text="Songs to add per artist").pack(side="left", padx=14, pady=14)
         ctk.CTkOptionMenu(count_frame, values=[str(n) for n in range(1, 11)], variable=self.top_song_count, command=self._save_song_preference).pack(side="left", padx=8)
         ctk.CTkLabel(count_frame, text="Spotify catalog search currently returns up to 10 ranked matches.").pack(side="left", padx=8)
 
-        source_frame = ctk.CTkFrame(parent)
-        source_frame.grid(row=2, column=0, padx=20, pady=8, sticky="ew")
+        source_frame = ctk.CTkFrame(content)
+        source_frame.grid(row=3, column=0, padx=12, pady=5, sticky="ew")
         ctk.CTkLabel(source_frame, text="Tracks to add").pack(side="left", padx=14, pady=14)
         ctk.CTkOptionMenu(source_frame, values=["Most popular songs", "Most recent releases"], variable=self.track_source, command=self._save_song_preference).pack(side="left", padx=8)
         ctk.CTkLabel(source_frame, text="The selected song count applies to either source.").pack(side="left", padx=8)
 
-        ctk.CTkLabel(parent, text="Streaming services", font=ctk.CTkFont(size=17, weight="bold")).grid(row=3, column=0, padx=20, pady=(18, 4), sticky="w")
-        services = ctk.CTkFrame(parent)
-        services.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="ew")
+        ctk.CTkLabel(content, text="2 · Track filters", font=ctk.CTkFont(size=18, weight="bold"), text_color="#7bdcb5").grid(row=4, column=0, padx=12, pady=(18, 2), sticky="w")
+        filters = ctk.CTkFrame(content)
+        filters.grid(row=5, column=0, padx=12, pady=5, sticky="ew")
+        ctk.CTkLabel(filters, text="Filters").pack(side="left", padx=14, pady=14)
+        ctk.CTkCheckBox(filters, text="Skip remixes / edits", variable=self.skip_remixes, command=self._save_song_preference).pack(side="left", padx=8)
+        ctk.CTkCheckBox(filters, text="Singles only", variable=self.singles_only, command=self._save_song_preference).pack(side="left", padx=8)
+        ctk.CTkCheckBox(filters, text="Remove duplicate titles", variable=self.dedupe_titles, command=self._save_song_preference).pack(side="left", padx=8)
+
+        release_frame = ctk.CTkFrame(content)
+        release_frame.grid(row=6, column=0, padx=12, pady=5, sticky="ew")
+        ctk.CTkLabel(release_frame, text="Release window").pack(side="left", padx=14, pady=14)
+        ctk.CTkOptionMenu(release_frame, values=["Any release date", "Last 30 days", "Last 90 days", "Last 365 days"], variable=self.release_window, command=self._save_song_preference).pack(side="left", padx=8)
+
+        ctk.CTkLabel(content, text="3 · Playlist details", font=ctk.CTkFont(size=18, weight="bold"), text_color="#7bdcb5").grid(row=7, column=0, padx=12, pady=(18, 2), sticky="w")
+        presentation = ctk.CTkFrame(content)
+        presentation.grid(row=8, column=0, padx=12, pady=5, sticky="ew")
+        ctk.CTkLabel(presentation, text="Playlist description").pack(side="left", padx=14, pady=14)
+        ctk.CTkEntry(presentation, textvariable=self.playlist_description, width=300, placeholder_text="Optional playlist description").pack(side="left", padx=8)
+        ctk.CTkCheckBox(presentation, text="Use flyer as cover where supported", variable=self.use_flyer_art, command=self._save_song_preference).pack(side="left", padx=8)
+
+        ctk.CTkLabel(content, text="4 · Streaming accounts", font=ctk.CTkFont(size=18, weight="bold"), text_color="#7bdcb5").grid(row=9, column=0, padx=12, pady=(18, 2), sticky="w")
+        ctk.CTkLabel(content, text="Connect only the services you intend to use. Green means the saved session is ready.", text_color=DISCONNECTED).grid(row=10, column=0, padx=12, pady=(0, 8), sticky="w")
+        services = ctk.CTkFrame(content)
+        services.grid(row=11, column=0, padx=12, pady=(0, 8), sticky="ew")
         services.grid_columnconfigure(1, weight=1)
         for row, platform in enumerate(ADAPTERS):
             ctk.CTkLabel(services, text=platform, width=125, anchor="w").grid(row=row, column=0, padx=14, pady=10, sticky="w")
@@ -121,12 +199,16 @@ class FlyerPlaylistApp(ctk.CTk):
             logout.grid(row=row, column=3, padx=(5, 14), pady=10)
             self.auth_buttons.append(login)
 
-        ctk.CTkLabel(parent, text="Logout removes this app's local session. Apple Music's user token remains in .env until you remove it there.", wraplength=760, justify="left").grid(row=5, column=0, padx=20, pady=(0, 20), sticky="w")
+        ctk.CTkLabel(content, text="Logout removes this app's local session. Apple Music's user token remains in .env until you remove it there.", text_color=DISCONNECTED, wraplength=760, justify="left").grid(row=12, column=0, padx=12, pady=(2, 18), sticky="w")
 
     def _save_song_preference(self, _value: str | None = None) -> None:
         self.token_store.save("preferences", {
             "songs_per_artist": int(self.top_song_count.get()),
             "track_source": self.track_source.get(),
+            "release_window": self.release_window.get(),
+            "skip_remixes": self.skip_remixes.get(), "singles_only": self.singles_only.get(),
+            "dedupe_titles": self.dedupe_titles.get(), "use_flyer_art": self.use_flyer_art.get(),
+            "playlist_description": self.playlist_description.get(),
         })
         self._log(f"Will add up to {self.top_song_count.get()} {self.track_source.get().lower()} per artist.")
 
@@ -273,6 +355,30 @@ class FlyerPlaylistApp(ctk.CTk):
         self._replace_review(TextCleaner().clean_as_text(current))
         self._log("Artist text cleaned and formatted.")
 
+    def import_artists(self) -> None:
+        path = filedialog.askopenfilename(title="Import artist list", filetypes=[("Text or CSV", "*.txt *.csv"), ("All files", "*.*")])
+        if not path:
+            return
+        with open(path, encoding="utf-8-sig") as file:
+            if path.lower().endswith(".csv"):
+                text = "\n".join(row[0] for row in csv.reader(file) if row)
+            else:
+                text = file.read()
+        self._replace_review(text)
+        self._log("Artist list imported. Review it, then use Clean / Format.")
+
+    def export_artists(self) -> None:
+        path = filedialog.asksaveasfilename(title="Export artist list", defaultextension=".txt", filetypes=[("Text", "*.txt"), ("CSV", "*.csv")])
+        if not path:
+            return
+        artists = TextCleaner().clean(self.review.get("1.0", "end"))
+        with open(path, "w", newline="", encoding="utf-8") as file:
+            if path.lower().endswith(".csv"):
+                writer = csv.writer(file); writer.writerow(["artist"]); writer.writerows([[artist] for artist in artists])
+            else:
+                file.write("\n".join(artists))
+        self._log(f"Exported {len(artists)} artists.")
+
     def _adapter(self, platform: str | None = None):
         # A fresh instance keeps the adapter lifetime within one user action.
         return ADAPTERS[platform or self.platform.get()]()
@@ -312,8 +418,10 @@ class FlyerPlaylistApp(ctk.CTk):
             self._log("Enter at least one artist before creating a playlist.")
             return
         platform = self.platform.get()
-        songs_per_artist = int(self.top_song_count.get())
         track_source = "recent" if self.track_source.get() == "Most recent releases" else "popular"
+        release_days = {"Any release date": 0, "Last 30 days": 30, "Last 90 days": 90, "Last 365 days": 365}[self.release_window.get()]
+        options = PlaylistOptions(int(self.top_song_count.get()), track_source, self.skip_remixes.get(),
+                                  self.singles_only.get(), release_days, self.dedupe_titles.get())
         def task():
             adapter = self._adapter()
             try:
@@ -322,8 +430,32 @@ class FlyerPlaylistApp(ctk.CTk):
                 self.after(0, lambda: self._set_service_state(platform, False, "Login required"))
                 raise
             self.after(0, lambda: self._set_service_state(platform, True))
-            result = PlaylistBuilder(adapter, self._log).build(artists, name, songs_per_artist, track_source)
+            preview = PlaylistBuilder(adapter, self._log).collect(artists, options)
+            self.after(0, lambda: PlaylistReviewDialog(self, preview, lambda tracks: self.create_approved(platform, name, tracks)))
+            self._log(f"Review ready: {len(preview.tracks)} candidate tracks. No playlist has been created yet.")
+        source_name = "recent releases" if track_source == "recent" else "popular songs"
+        self._worker(f"Finding {source_name} from {len(artists)} artist(s)…", task)
+
+    def _artwork_bytes(self) -> bytes | None:
+        if not (self.use_flyer_art.get() and self.current_image):
+            return None
+        # Spotify requires JPEG; converting here also limits playlist artwork to the selected crop.
+        image = self.current_image.copy().convert("RGB")
+        image.thumbnail((640, 640))
+        buffer = BytesIO(); image.save(buffer, format="JPEG", quality=88)
+        return buffer.getvalue()
+
+    def create_approved(self, platform: str, name: str, tracks) -> None:
+        description = self.playlist_description.get().strip() or f"SoundFlix • {self.track_source.get()}"
+        artwork = self._artwork_bytes()
+        def task():
+            adapter = self._adapter(platform)
+            adapter.authenticate(self._log)
+            result = PlaylistBuilder(adapter, self._log).create(name, tracks, description, artwork)
+            history = self.token_store.load("playlist_history") or []
+            history.insert(0, {"name": result.name, "platform": platform, "tracks": result.track_count, "url": result.url or ""})
+            self.token_store.save("playlist_history", history[:50])
+            self.after(0, self.refresh_history)
             url = f" Open it: {result.url}" if result.url else ""
             self._log(f"Done — created '{result.name}' with {result.track_count} tracks.{url}")
-        source_name = "recent releases" if track_source == "recent" else "popular songs"
-        self._worker(f"Creating {platform} playlist from {len(artists)} artist(s), up to {songs_per_artist} {source_name} each…", task)
+        self._worker(f"Creating approved {platform} playlist…", task)

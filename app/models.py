@@ -19,6 +19,8 @@ class Track:
     uri: str | None = None
     popularity: int | None = None
     raw: Any = None
+    release_date: str | None = None
+    release_type: str | None = None
 
 
 @dataclass(frozen=True)

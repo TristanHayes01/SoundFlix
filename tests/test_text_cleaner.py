@@ -35,7 +35,7 @@ class _SourceSelectingAdapter:
         self.called = f"recent:{limit}"
         return [Track("recent-1", "Recent", "Artist")]
 
-    def create_playlist(self, name, tracks):
+    def create_playlist(self, name, tracks, description="", artwork=None):
         return PlaylistResult(name, None, len(tracks))
 
 

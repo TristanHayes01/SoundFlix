@@ -66,7 +66,7 @@ class TidalAdapter(BaseMusicAdapter):
             entries = session_method(artist.id, limit=limit)
         else:
             raise RuntimeError("Installed tidalapi lacks an artist top-tracks method; update tidalapi.")
-        return [Track(str(t.id), t.name, artist.name, str(t.id), getattr(t, "popularity", None), t) for t in entries]
+        return [Track(str(t.id), t.name, artist.name, str(t.id), getattr(t, "popularity", None), t, str(getattr(t, "release_date", "") or ""), None) for t in entries]
 
     def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         """Use the artist's albums and EP/singles, ordered by their release date."""
@@ -88,14 +88,14 @@ class TidalAdapter(BaseMusicAdapter):
                 track_id = str(track.id)
                 if track_id in seen:
                     continue
-                found.append(Track(track_id, track.name, artist.name, track_id, getattr(track, "popularity", None), track))
+                found.append(Track(track_id, track.name, artist.name, track_id, getattr(track, "popularity", None), track, str(getattr(release, "release_date", "") or ""), getattr(release, "type", None)))
                 seen.add(track_id)
                 if len(found) == limit:
                     return found
         return found
 
-    def create_playlist(self, name: str, tracks: list[Track]) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
         self._require_login()
-        playlist = self.session.user.create_playlist(name, "Created by SoundFlix")
+        playlist = self.session.user.create_playlist(name, description or "Created by SoundFlix")
         playlist.add([int(track.id) for track in tracks])
         return PlaylistResult(name, getattr(playlist, "share_url", None), len(tracks))
