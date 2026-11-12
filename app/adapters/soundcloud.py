@@ -67,9 +67,21 @@ class SoundCloudAdapter(BaseMusicAdapter):
         return response
 
     def search_artist(self, query: str) -> Artist | None:
-        items = self._request("GET", "/users", params={"q": query, "limit": 10}).json()
-        exact = next((x for x in items if x.get("username", "").casefold() == query.casefold()), items[0] if items else None)
-        return Artist(str(exact["id"]), exact["username"], exact) if exact else None
+        artists = self.search_artists(query)
+        return next((artist for artist in artists if artist.name.casefold() == query.casefold()), artists[0] if artists else None)
+
+    def search_artists(self, query: str, limit: int = 10) -> list[Artist]:
+        items = self._request("GET", "/users", params={"q": query, "limit": min(limit, 200)}).json()
+        return [Artist(str(item["id"]), item.get("username", "Unknown artist"), item,
+                       item.get("permalink_url") or f"https://soundcloud.com/{item.get('permalink', '')}",
+                       item.get("avatar_url")) for item in items]
+
+    def artist_from_profile_url(self, url: str) -> Artist | None:
+        item = self._request("GET", "/resolve", params={"url": url}).json()
+        if item.get("kind") not in (None, "user"):
+            raise RuntimeError("Paste a SoundCloud artist profile link, not a track or playlist link.")
+        return Artist(str(item["id"]), item.get("username", "Unknown artist"), item,
+                      item.get("permalink_url") or url, item.get("avatar_url"))
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         # SoundCloud exposes no global popularity endpoint. The documented track search is ranked locally.
@@ -91,7 +103,7 @@ class SoundCloudAdapter(BaseMusicAdapter):
         items = payload.get("collection", payload) if isinstance(payload, dict) else payload
         return [x for x in items if str(x.get("user_id")) == artist.id and x.get("streamable", True)]
 
-    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         payload = {"playlist": {
             "title": name, "description": description or "Created by SoundFlix", "sharing": "private",
             "tracks": [{"id": int(track.id)} for track in tracks],

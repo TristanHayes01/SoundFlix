@@ -1,5 +1,5 @@
 """Application entry point."""
-from app.ui.app import FlyerPlaylistApp
+from app.ui.app import SoundFlixApp
 
 if __name__ == "__main__":
-    FlyerPlaylistApp().mainloop()
+    SoundFlixApp().mainloop()

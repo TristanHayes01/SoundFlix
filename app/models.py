@@ -9,6 +9,8 @@ class Artist:
     id: str
     name: str
     raw: Any = None
+    profile_url: str | None = None
+    profile_image_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class Track:
     raw: Any = None
     release_date: str | None = None
     release_type: str | None = None
+    selection_source: str | None = None
 
 
 @dataclass(frozen=True)

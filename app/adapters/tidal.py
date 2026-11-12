@@ -1,11 +1,14 @@
 """TIDAL adapter built around tidalapi's supported interactive OAuth helper."""
 from __future__ import annotations
 from datetime import datetime
+import re
 import tidalapi
 from app.models import Artist, PlaylistResult, Track
 from app.services.token_store import TokenStore
 from .base import BaseMusicAdapter
 from .oauth import open_default_browser
+
+_TIDAL_DEFAULT_ARTIST_PICTURE = "1e01cdb6-f15d-4d8b-8440-a047976c1cac"
 
 
 class TidalAdapter(BaseMusicAdapter):
@@ -49,11 +52,48 @@ class TidalAdapter(BaseMusicAdapter):
             raise RuntimeError("TIDAL is not authenticated. Press Login first.")
 
     def search_artist(self, query: str) -> Artist | None:
+        artists = self.search_artists(query)
+        return next((artist for artist in artists if artist.name.casefold() == query.casefold()), artists[0] if artists else None)
+
+    def search_artists(self, query: str, limit: int = 10) -> list[Artist]:
         self._require_login()
-        result = self.session.search(query, models=[tidalapi.Artist], limit=10)
+        result = self.session.search(query, models=[tidalapi.Artist], limit=limit)
         artists = result.get("artists", []) if isinstance(result, dict) else result
-        match = next((a for a in artists if a.name.casefold() == query.casefold()), artists[0] if artists else None)
-        return Artist(str(match.id), match.name, match) if match else None
+        return [Artist(
+            str(item.id), item.name, item,
+            getattr(item, "share_url", None) or getattr(item, "url", None) or f"https://tidal.com/artist/{item.id}",
+            self._artist_image_url(item),
+        ) for item in artists]
+
+    def artist_from_profile_url(self, url: str) -> Artist | None:
+        self._require_login()
+        match = re.search(r"/artist/(\d+)", url)
+        if not match:
+            raise RuntimeError("Paste a TIDAL artist profile link.")
+        raw = self.session.artist(match.group(1))
+        return Artist(
+            str(raw.id), raw.name, raw,
+            getattr(raw, "share_url", None) or getattr(raw, "url", None) or url,
+            self._artist_image_url(raw),
+        )
+
+    @staticmethod
+    def _artist_image_url(artist) -> str | None:
+        """Return TIDAL's real artist portrait, never its generic microphone asset.
+
+        ``tidalapi`` fills a missing ``picture`` with a known default UUID.  The
+        prior workaround suppressed *every* image to avoid that one placeholder;
+        instead, only suppress the default and keep genuine artist portraits.
+        """
+        picture = getattr(artist, "picture", None)
+        if not picture or picture == _TIDAL_DEFAULT_ARTIST_PICTURE:
+            return None
+        try:
+            return artist.image(320)
+        except (AttributeError, TypeError, ValueError):
+            # A search result can occasionally contain incomplete image metadata.
+            # The UI will render its neutral placeholder in that case.
+            return None
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         self._require_login()
@@ -94,7 +134,7 @@ class TidalAdapter(BaseMusicAdapter):
                     return found
         return found
 
-    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         self._require_login()
         playlist = self.session.user.create_playlist(name, description or "Created by SoundFlix")
         playlist.add([int(track.id) for track in tracks])

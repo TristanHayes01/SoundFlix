@@ -1,6 +1,8 @@
 # SoundFlix
 
-SoundFlix is a CustomTkinter desktop application that turns typed artist names—or a cropped festival flyer—into a playlist. The UI stays responsive because OCR, logins, searches, and playlist writes run on worker threads. It uses an OCR Strategy Pattern, a music Platform Adapter Pattern, and a standalone, testable text-cleaning service.
+SoundFlix is a CustomTkinter desktop application that turns typed or imported artist lists into playlists. The UI stays responsive because logins, profile checks, track searches, and playlist writes run in background workers. It uses a music Platform Adapter Pattern and a standalone, testable text-cleaning service.
+
+
 
 ## Current platform behaviour
 
@@ -11,13 +13,19 @@ SoundFlix is a CustomTkinter desktop application that turns typed artist names�
 | TIDAL | tidalapi browser/device login | Uses Artist.top_tracks() and tidalapi playlist creation. |
 | Apple Music | signed developer JWT + Music User Token | Uses the catalog artist top-songs view, then catalog search as a fallback. |
 
-In **Settings**, choose whether each artist contributes their most popular songs or their most recent releases. The songs-per-artist selector applies to either choice (one to ten tracks).
+## Highlights
+
+- Type or import an artist list, then use **Clean / Format** to split common collaborations, remove set/event noise, normalize whitespace, and remove duplicates.
+- Choose most popular songs, most recent releases, or both. Each source has its own one-to-ten track count.
+- Control the number of concurrent artist-search workers in **Settings**. The builder displays progress such as `Searching 14 of 86 artists · 4 active workers`.
+- If several exact-name profiles are found, SoundFlix opens a confirmation dialog while remaining searches continue.
+- Review every candidate track before creating the playlist.
 
 Spotify’s PKCE and playlist APIs are documented at [Spotify for Developers](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) and the [February 2026 migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide). SoundCloud’s OAuth 2.1 PKCE and playlist APIs are in its [API guide](https://developers.soundcloud.com/docs/api/). TIDAL’s wrapper login flow is documented by [tidalapi](https://tidalapi.netlify.app/login). Apple requires a Music User Token for library actions, and supports playlist creation via [Apple Music API](https://developer.apple.com/documentation/applemusicapi/create-a-new-library-playlist).
 
 ## Installation
 
-1. Install Python 3.11 or later. Python 3.11 is the most straightforward choice for EasyOCR/PyTorch.
+1. Install Python 3.11 or later.
 2. Open PowerShell in this directory and run:
 
    ~~~powershell
@@ -29,13 +37,7 @@ Spotify’s PKCE and playlist APIs are documented at [Spotify for Developers](ht
    ~~~
 
 3. Edit .env with the credentials for only the platforms you intend to use.
-4. Test cleaning rules separately with pytest.
-
-### OCR
-
-- **Built-in OCR** is EasyOCR. It downloads its language model on first use and needs no Tesseract install.
-- **Tesseract OCR** requires [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki). Install it and add it to PATH, or set pytesseract.pytesseract.tesseract_cmd in your local configuration.
-  The app also checks `C:\Program Files\Tesseract-OCR\tesseract.exe` automatically. For a custom install path, set `TESSERACT_CMD` in `.env`.
+4. Run tests with `pytest -q`.
 
 ## Credential setup
 
@@ -77,9 +79,8 @@ Spotify’s PKCE and playlist APIs are documented at [Spotify for Developers](ht
 ~~~text
 app/
   adapters/       BaseMusicAdapter plus Spotify, SoundCloud, TIDAL, Apple Music
-  ocr/            BaseOCREngine plus Tesseract and EasyOCR implementations
   services/       TokenStore, TextCleaner, PlaylistBuilder
-  ui/             CustomTkinter window and interactive Canvas crop dialog
+  ui/             CustomTkinter window and playlist-review dialog
   config.py       Environment-only configuration
   main.py         Entry point
 tests/
@@ -88,8 +89,9 @@ tests/
 
 ## User flow
 
-1. Type artist names or upload a flyer.
-2. Crop a text area if helpful, choose OCR, and run it.
-3. Correct the editable review text; **Clean / Format** splits B2B, FT., FEAT., and ampersand collaborations, removes common set noise, and deduplicates entries.
-4. Select a platform, authenticate, give the playlist a name, then click **Create playlist**.
-5. Read the activity log for skipped artists, lower-than-five results, rate limiting, expired tokens, and the resulting playlist link.
+1. Type artist names or import a text/CSV artist list.
+2. Review the editable list. **Clean / Format** splits B2B, FT., FEAT., and ampersand collaborations, removes common set noise, and deduplicates entries.
+3. In **Settings**, choose song sources, counts, filters, worker count, playlist description, and sign in to a streaming service.
+4. Give the playlist a name, select a logged-in platform, and click **Build playlist**.
+5. If names are ambiguous, verify the correct profiles or skip them while the rest of the catalog continues processing.
+6. Review and select the resulting tracks, then create the playlist. The activity log records unmatched artists, partial results, rate limits, expired sessions, and the playlist link.

@@ -1,9 +1,5 @@
 customtkinter>=5.2,<6
 Pillow>=10.0
-pytesseract>=0.3.13
-easyocr>=1.7
-opencv-python-headless>=4.9
-numpy>=1.26
 python-dotenv>=1.0
 requests>=2.32
 spotipy>=2.25
@@ -11,3 +7,4 @@ tidalapi>=0.8.3
 keyring>=25.0
 PyJWT[crypto]>=2.9
 pytest>=8.0
+pyinstaller>=6.10,<7

@@ -1,7 +1,7 @@
 """Spotify adapter using Authorization Code + PKCE and the current Web API."""
 from __future__ import annotations
 from urllib.parse import urlencode
-import base64
+import re
 import time
 import requests
 import spotipy
@@ -42,7 +42,7 @@ class SpotifyAdapter(BaseMusicAdapter):
         params = {
             "client_id": settings.spotify_client_id, "response_type": "code",
             "redirect_uri": settings.spotify_redirect_uri, "state": state,
-            "scope": "playlist-modify-private playlist-modify-public ugc-image-upload",
+            "scope": "playlist-modify-private playlist-modify-public",
             "code_challenge_method": "S256", "code_challenge": pkce.challenge,
         }
         log("Opening Spotify authorization in your browser…")
@@ -76,12 +76,32 @@ class SpotifyAdapter(BaseMusicAdapter):
         return response
 
     def search_artist(self, query: str) -> Artist | None:
+        artists = self.search_artists(query)
+        exact = next((artist for artist in artists if artist.name.casefold() == query.casefold()), artists[0] if artists else None)
+        return exact
+
+    def search_artists(self, query: str, limit: int = 10) -> list[Artist]:
         if not self.client:
             raise RuntimeError("Spotify is not authenticated.")
-        items = self.client.search(q=query, type="artist", limit=5).get("artists", {}).get("items", [])
-        # Exact display-name match wins over Spotify's relevance ordering.
-        match = next((x for x in items if x["name"].casefold() == query.casefold()), items[0] if items else None)
-        return Artist(match["id"], match["name"], match) if match else None
+        items = self.client.search(q=query, type="artist", limit=min(limit, 50)).get("artists", {}).get("items", [])
+        return [Artist(
+            item["id"], item["name"], item,
+            item.get("external_urls", {}).get("spotify") or f"https://open.spotify.com/artist/{item['id']}",
+            next((image.get("url") for image in item.get("images", []) if image.get("url")), None),
+        ) for item in items]
+
+    def artist_from_profile_url(self, url: str) -> Artist | None:
+        if not self.client:
+            raise RuntimeError("Spotify is not authenticated.")
+        match = re.search(r"(?:spotify:artist:|/artist/)([A-Za-z0-9]+)", url)
+        if not match:
+            raise RuntimeError("Paste a Spotify artist profile link.")
+        item = self.client.artist(match.group(1))
+        return Artist(
+            item["id"], item["name"], item,
+            item.get("external_urls", {}).get("spotify") or f"https://open.spotify.com/artist/{item['id']}",
+            next((image.get("url") for image in item.get("images", []) if image.get("url")), None),
+        )
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         # /artists/{id}/top-tracks was removed in 2026. Rank artist-constrained search tracks instead.
@@ -115,16 +135,8 @@ class SpotifyAdapter(BaseMusicAdapter):
                     return found
         return found
 
-    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": description or "Created by SoundFlix"}).json()
         for offset in range(0, len(tracks), 100):
             self._request("POST", f"/playlists/{playlist['id']}/items", json={"uris": [t.uri for t in tracks[offset:offset + 100]]})
-        if artwork:
-            # Spotify accepts base64-encoded JPEG artwork. It requires the ugc-image-upload scope.
-            response = self.session.put(f"{self.API}/playlists/{playlist['id']}/images", headers={
-                "Authorization": f"Bearer {self.access_token}", "Content-Type": "image/jpeg"},
-                data=base64.b64encode(artwork), timeout=25)
-            # Cover upload is optional; playlist creation remains successful if the scope is absent.
-            if not response.ok:
-                pass
         return PlaylistResult(name, playlist.get("external_urls", {}).get("spotify"), len(tracks))

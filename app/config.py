@@ -4,9 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import sys
 from dotenv import load_dotenv
 
-load_dotenv()  # Never overwrite explicitly supplied environment values.
+
+def _dotenv_path() -> Path:
+    """Use the project folder in development and the app folder when packaged."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / ".env"
+    return Path(__file__).resolve().parents[1] / ".env"
+
+
+load_dotenv(_dotenv_path())  # Never overwrite explicitly supplied environment values.
 
 
 @dataclass(frozen=True)

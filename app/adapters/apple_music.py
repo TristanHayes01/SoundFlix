@@ -2,6 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 import time
+import re
 import jwt
 import requests
 from app.config import settings
@@ -53,12 +54,34 @@ class AppleMusicAdapter(BaseMusicAdapter):
         return response
 
     def search_artist(self, query: str) -> Artist | None:
+        artists = self.search_artists(query)
+        return next((artist for artist in artists if artist.name.casefold() == query.casefold()), artists[0] if artists else None)
+
+    def search_artists(self, query: str, limit: int = 10) -> list[Artist]:
         data = self._request("GET", f"/catalog/{self.storefront}/search", params={
-            "term": query, "types": "artists", "limit": 10,
+            "term": query, "types": "artists", "limit": min(limit, 25),
         }).json()
         artists = data.get("results", {}).get("artists", {}).get("data", [])
-        exact = next((a for a in artists if a["attributes"]["name"].casefold() == query.casefold()), artists[0] if artists else None)
-        return Artist(exact["id"], exact["attributes"]["name"], exact) if exact else None
+        return [Artist(
+            item["id"], item["attributes"]["name"], item,
+            item["attributes"].get("url") or f"https://music.apple.com/{self.storefront}/artist/{item['id']}",
+            item["attributes"].get("artwork", {}).get("url", "").replace("{w}", "160").replace("{h}", "160").replace("{f}", "jpg"),
+        ) for item in artists]
+
+    def artist_from_profile_url(self, url: str) -> Artist | None:
+        match = re.search(r"/artist/(?:[^/]+/)?(\d+)", url)
+        if not match:
+            raise RuntimeError("Paste an Apple Music artist profile link.")
+        payload = self._request("GET", f"/catalog/{self.storefront}/artists/{match.group(1)}").json()
+        items = payload.get("data", [])
+        if not items:
+            return None
+        item = items[0]
+        return Artist(
+            item["id"], item["attributes"]["name"], item,
+            item["attributes"].get("url") or url,
+            item["attributes"].get("artwork", {}).get("url", "").replace("{w}", "160").replace("{h}", "160").replace("{f}", "jpg"),
+        )
 
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         # The catalog top-songs view reflects Apple Music editorial/catalog ordering when available.
@@ -102,7 +125,7 @@ class AppleMusicAdapter(BaseMusicAdapter):
             songs.sort(key=lambda song: song["attributes"].get("releaseDate", ""), reverse=True)
         return [Track(song["id"], song["attributes"]["name"], song["attributes"]["artistName"], song["id"], None, song, song["attributes"].get("releaseDate"), None) for song in songs[:limit]]
 
-    def create_playlist(self, name: str, tracks: list[Track], description: str = "", artwork: bytes | None = None) -> PlaylistResult:
+    def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         data = self._request("POST", "/me/library/playlists", json={
             "attributes": {"name": name, "description": {"standard": description or "Created by SoundFlix"}},
             "relationships": {"tracks": {"data": [{"id": t.id, "type": "songs"} for t in tracks]}},
