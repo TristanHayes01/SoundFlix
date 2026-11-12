@@ -6,7 +6,7 @@ import re
 import jwt
 import requests
 from app.config import settings
-from app.models import Artist, PlaylistResult, Track
+from app.models import Artist, PlaylistResult, Track, UserPlaylist
 from app.services.token_store import TokenStore
 from .base import BaseMusicAdapter
 
@@ -124,6 +124,39 @@ class AppleMusicAdapter(BaseMusicAdapter):
                      if artist.name.casefold() in song["attributes"].get("artistName", "").casefold()]
             songs.sort(key=lambda song: song["attributes"].get("releaseDate", ""), reverse=True)
         return [Track(song["id"], song["attributes"]["name"], song["attributes"]["artistName"], song["id"], None, song, song["attributes"].get("releaseDate"), None) for song in songs[:limit]]
+
+    @staticmethod
+    def _library_track(item: dict) -> Track | None:
+        attributes = item.get("attributes", {})
+        # Library tracks can include personal uploads. Catalog ID is required to
+        # add a track to a new Apple Music playlist through this API.
+        catalog_id = attributes.get("playParams", {}).get("catalogId")
+        if not catalog_id:
+            return None
+        return Track(catalog_id, attributes.get("name", "Untitled"), attributes.get("artistName", "Unknown artist"),
+                     catalog_id, None, item, attributes.get("releaseDate"), None, "library")
+
+    def _library_pages(self, path: str) -> list[dict]:
+        items: list[dict] = []
+        offset = 0
+        while True:
+            payload = self._request("GET", path, params={"limit": 100, "offset": offset}).json()
+            page = payload.get("data", [])
+            items.extend(page)
+            if not payload.get("next"):
+                return items
+            offset += len(page)
+
+    def get_liked_tracks(self) -> list[Track]:
+        return [track for item in self._library_pages("/me/library/songs") if (track := self._library_track(item))]
+
+    def get_user_playlists(self) -> list[UserPlaylist]:
+        return [UserPlaylist(item["id"], item.get("attributes", {}).get("name", "Untitled playlist"), item)
+                for item in self._library_pages("/me/library/playlists")]
+
+    def get_playlist_tracks(self, playlist: UserPlaylist) -> list[Track]:
+        return [track for item in self._library_pages(f"/me/library/playlists/{playlist.id}/tracks")
+                if (track := self._library_track(item))]
 
     def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         data = self._request("POST", "/me/library/playlists", json={

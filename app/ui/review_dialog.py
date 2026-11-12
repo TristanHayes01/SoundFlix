@@ -19,7 +19,7 @@ class PlaylistReviewDialog(ctk.CTkToplevel):
         self.minsize(600, 450)
         self.transient(parent)
         self.preview, self.on_create = preview, on_create
-        self.selected: list[tuple[Track, ctk.BooleanVar]] = []
+        self.selected: list[tuple[Track, ctk.BooleanVar, str]] = []
         self.images: list[ctk.CTkImage] = []
         ctk.CTkLabel(self, text="Review matches before creating the playlist", font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", padx=18, pady=(18, 4))
         ctk.CTkLabel(self, text="Unchecked tracks will not be added. A matched artist name is shown above its tracks.", text_color="#e5a93d").pack(anchor="w", padx=18, pady=(0, 10))
@@ -56,7 +56,7 @@ class PlaylistReviewDialog(ctk.CTkToplevel):
                 )
                 track_button.configure(command=lambda value=checked, button=track_button, text=label: self._toggle_track(value, button, text))
                 track_button.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
-                self.selected.append((track, checked))
+                self.selected.append((track, checked, heading))
                 artist_selected.append((checked, track_button, label))
         controls = ctk.CTkFrame(self, fg_color="transparent")
         controls.pack(fill="x", padx=18, pady=(4, 18))
@@ -65,7 +65,18 @@ class PlaylistReviewDialog(ctk.CTkToplevel):
         ctk.CTkButton(controls, text="Cancel", command=self.destroy).pack(side="right", padx=8)
 
     def tracks(self) -> list[Track]:
-        return [track for track, checked in self.selected if checked.get()]
+        return [track for track, checked, _artist in self.selected if checked.get()]
+
+    def artists(self) -> list[str]:
+        """Return the verified artist profiles that contributed selected tracks."""
+        output: list[str] = []
+        seen: set[str] = set()
+        for _track, checked, artist in self.selected:
+            key = artist.casefold()
+            if checked.get() and key not in seen:
+                seen.add(key)
+                output.append(artist)
+        return output
 
     @staticmethod
     def _set_artist_selection(rows: list[tuple[ctk.BooleanVar, ctk.CTkButton, str]], selected: bool) -> None:
@@ -111,5 +122,5 @@ class PlaylistReviewDialog(ctk.CTkToplevel):
     def approve(self) -> None:
         tracks = self.tracks()
         if tracks:
-            self.on_create(tracks)
+            self.on_create(tracks, self.artists())
             self.destroy()

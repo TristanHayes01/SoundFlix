@@ -27,6 +27,14 @@ class Track:
 
 
 @dataclass(frozen=True)
+class UserPlaylist:
+    """A playlist owned by or available in the authenticated user's library."""
+    id: str
+    name: str
+    raw: Any = None
+
+
+@dataclass(frozen=True)
 class PlaylistResult:
     name: str
     url: str | None

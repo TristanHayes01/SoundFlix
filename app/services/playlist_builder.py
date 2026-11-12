@@ -21,11 +21,22 @@ class PlaylistOptions:
     skip_remixes: bool = False
     singles_only: bool = False
     released_within_days: int = 0  # 0 means all available dates.
+    release_start: date | None = None
+    release_end: date | None = None
     dedupe_titles: bool = True
+    include_liked_tracks: bool = False
+    include_playlist_tracks: bool = False
+    selected_playlist_ids: tuple[str, ...] = ()
+    all_library_playlists: bool = False
+    include_collaborations: bool = True
 
     @property
     def requested_count(self) -> int:
         return (self.popular_song_count if self.include_popular else 0) + (self.recent_song_count if self.include_recent else 0)
+
+    @property
+    def has_release_filter(self) -> bool:
+        return bool(self.released_within_days or self.release_start or self.release_end)
 
 
 @dataclass(frozen=True)
@@ -248,7 +259,11 @@ class PlaylistBuilder:
                 artist = adapter.artist_from_profile_url(artist.profile_url) or artist
             tracks: list[Track] = []
             if options.include_popular:
-                tracks.extend(replace(track, selection_source="popular") for track in adapter.get_top_5_tracks(artist, options.popular_song_count))
+                # Fetch a larger popularity pool first when a release window is
+                # active. Otherwise five older hits can be filtered away before
+                # SoundFlix has a chance to discover eligible newer songs.
+                popular_limit = max(options.popular_song_count, 50) if options.has_release_filter else options.popular_song_count
+                tracks.extend(replace(track, selection_source="popular") for track in adapter.get_top_5_tracks(artist, popular_limit))
             if options.include_recent:
                 tracks.extend(replace(track, selection_source="recent") for track in adapter.get_recent_tracks(artist, options.recent_song_count))
             return index, artist, tracks, None
@@ -286,25 +301,91 @@ class PlaylistBuilder:
             for index, name in enumerate(artists, start=1):
                 gathered[index] = tracked_lookup(index, name)
 
+        entries_by_requested: dict[str, PreviewArtist] = {}
+        matched_artists: dict[str, Artist] = {}
         for index, artist_name in enumerate(artists, start=1):
             _index, artist, tracks, note = gathered[index]
             if not artist:
                 self.log(f"  {note}: {artist_name}")
-                preview.artists.append(PreviewArtist(artist_name, note=note))
+                entry = PreviewArtist(artist_name, note=note)
+                preview.artists.append(entry)
+                entries_by_requested[artist_name.casefold()] = entry
                 continue
             tracks = self._filter(tracks, options, seen_titles)
-            if len(tracks) < options.requested_count:
+            if options.requested_count and len(tracks) < options.requested_count:
                 self.log(f"  Only {len(tracks)} of {options.requested_count} requested tracks available for {artist.name} after filters.")
             accepted: list[Track] = []
             for track in tracks:
                 if track.id not in seen_track_ids:
                     accepted.append(track)
                     seen_track_ids.add(track.id)
-            preview.artists.append(PreviewArtist(artist_name, artist.name, accepted, profile_image_url=artist.profile_image_url))
-            self.log(f"  Found {len(accepted)} tracks from {artist.name}.")
+            entry = PreviewArtist(artist_name, artist.name, accepted, profile_image_url=artist.profile_image_url)
+            preview.artists.append(entry)
+            entries_by_requested[artist_name.casefold()] = entry
+            matched_artists[artist_name.casefold()] = artist
+            if options.requested_count and accepted:
+                self.log(f"  Added {len(accepted)} catalog track(s) from {artist.name}.")
+
+        if options.include_liked_tracks or options.include_playlist_tracks:
+            library_tracks: list[Track] = []
+            if options.include_liked_tracks:
+                self.log("Reading liked/saved songs from your library…")
+                library_tracks.extend(self.adapter.get_liked_tracks())
+            if options.include_playlist_tracks:
+                playlists = {playlist.id: playlist for playlist in self.adapter.get_user_playlists()}
+                chosen = (playlists.values() if options.all_library_playlists else
+                          (playlists[playlist_id] for playlist_id in options.selected_playlist_ids if playlist_id in playlists))
+                for playlist in chosen:
+                    self.log(f"Reading selected playlist: {playlist.name}")
+                    library_tracks.extend(self.adapter.get_playlist_tracks(playlist))
+            self._add_library_matches(
+                preview, entries_by_requested, matched_artists, library_tracks,
+                options, seen_track_ids, seen_titles,
+            )
         if not preview.tracks:
-            raise RuntimeError("No playable tracks were found. Check artist names and platform availability.")
+            raise RuntimeError("No tracks matched the selected song sources and filters. Try widening the release window or changing the filters.")
         return preview
+
+    def _add_library_matches(self, preview: PlaylistPreview,
+                             entries_by_requested: dict[str, PreviewArtist],
+                             matched_artists: dict[str, Artist], library_tracks: list[Track],
+                             options: PlaylistOptions, seen_track_ids: set[str],
+                             seen_titles: set[str]) -> None:
+        """Add user-library tracks that credit one of the accepted lineup artists."""
+        added = 0
+        for requested_key, artist in matched_artists.items():
+            entry = entries_by_requested[requested_key]
+            matching = [replace(track, selection_source="library") for track in library_tracks
+                        if self._library_track_matches(track, artist, options.include_collaborations)]
+            matching = self._filter(matching, options, seen_titles)
+            for track in matching:
+                if track.id not in seen_track_ids:
+                    entry.tracks.append(track)
+                    seen_track_ids.add(track.id)
+                    added += 1
+        sources: list[str] = []
+        if options.include_liked_tracks:
+            sources.append("liked/saved songs")
+        if options.include_playlist_tracks:
+            sources.append("selected playlists")
+        self.log(f"  Added {added} matching track(s) from {', '.join(sources)}.")
+
+    @staticmethod
+    def _library_track_matches(track: Track, artist: Artist, include_collaborations: bool) -> bool:
+        target_name = artist.name.casefold()
+        raw_artists = track.raw.get("artists", []) if isinstance(track.raw, dict) else getattr(track.raw, "artists", [])
+        credits: list[tuple[str, str | None]] = []
+        for credited in raw_artists or []:
+            if isinstance(credited, dict):
+                credits.append((str(credited.get("name", "")), str(credited.get("id")) if credited.get("id") else None))
+            else:
+                credits.append((str(getattr(credited, "name", "")), str(getattr(credited, "id", "")) or None))
+        text_credits = [name.strip() for name in re.split(r"\s*(?:,|&|\bfeat\.?\b|\bft\.?\b)\s*", track.artist_name, flags=re.IGNORECASE) if name.strip()]
+        if not credits:
+            credits = [(name, None) for name in text_credits]
+        candidates = credits if include_collaborations else credits[:1]
+        return any(name.casefold() == target_name or (identifier and identifier == artist.id)
+                   for name, identifier in candidates)
 
     def create(self, playlist_name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         if not tracks:
@@ -325,7 +406,10 @@ class PlaylistBuilder:
         return self.create(playlist_name, preview.tracks)
 
     def _filter(self, tracks: list[Track], options: PlaylistOptions, seen_titles: set[str]) -> list[Track]:
-        cutoff = date.today() - timedelta(days=options.released_within_days) if options.released_within_days else None
+        cutoff = options.release_start or (date.today() - timedelta(days=options.released_within_days) if options.released_within_days else None)
+        # A rolling "last N days" range ends today. Explicit custom ranges
+        # provide their own end date, including the future-facing date mode.
+        end_date = options.release_end or (date.today() if options.released_within_days else None)
         output: list[Track] = []
         for track in tracks:
             title_key = re.sub(r"\s*\([^)]*\)|\s*\[[^]]*\]", "", track.title).casefold().strip()
@@ -333,12 +417,19 @@ class PlaylistBuilder:
                 continue
             if options.singles_only and track.release_type not in (None, "single"):
                 continue
-            if cutoff and track.release_date:
+            if cutoff or end_date:
+                if not track.release_date:
+                    # A release-window filter must not silently admit music
+                    # whose date cannot be verified by the provider.
+                    continue
                 try:
-                    if date.fromisoformat(track.release_date[:10]) < cutoff:
+                    released = date.fromisoformat(track.release_date[:10])
+                    if cutoff and released < cutoff:
+                        continue
+                    if end_date and released > end_date:
                         continue
                 except ValueError:
-                    pass  # Unknown precision: retain instead of silently discarding it.
+                    continue
             if options.dedupe_titles and title_key in seen_titles:
                 continue
             seen_titles.add(title_key)

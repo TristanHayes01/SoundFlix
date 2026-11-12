@@ -2,7 +2,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from app.models import Artist, PlaylistResult, Track
+from app.models import Artist, PlaylistResult, Track, UserPlaylist
 
 
 class BaseMusicAdapter(ABC):
@@ -26,6 +26,17 @@ class BaseMusicAdapter(ABC):
     def artist_from_profile_url(self, url: str) -> Artist | None:
         """Resolve a provider profile URL to a playable artist candidate."""
         raise RuntimeError(f"Pasted profile links are not supported for {self.name}.")
+
+    def get_liked_tracks(self) -> list[Track]:
+        """Return every track in the user's liked/saved music collection."""
+        raise RuntimeError(f"{self.name} does not expose liked songs for this account.")
+
+    def get_user_playlists(self) -> list[UserPlaylist]:
+        """Return playlists that the authenticated user can choose for matching."""
+        raise RuntimeError(f"{self.name} does not expose the user's playlists for this account.")
+
+    def get_playlist_tracks(self, playlist: UserPlaylist) -> list[Track]:
+        raise RuntimeError(f"{self.name} does not expose playlist tracks for this account.")
 
     @abstractmethod
     def get_top_5_tracks(self, artist: Artist, limit: int = 5) -> list[Track]: ...

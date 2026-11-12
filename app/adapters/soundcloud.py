@@ -5,7 +5,7 @@ import secrets
 import time
 import requests
 from app.config import settings
-from app.models import Artist, PlaylistResult, Track
+from app.models import Artist, PlaylistResult, Track, UserPlaylist
 from app.services.token_store import TokenStore
 from .base import BaseMusicAdapter
 from .oauth import OAuthCallback, PKCE
@@ -102,6 +102,37 @@ class SoundCloudAdapter(BaseMusicAdapter):
         }).json()
         items = payload.get("collection", payload) if isinstance(payload, dict) else payload
         return [x for x in items if str(x.get("user_id")) == artist.id and x.get("streamable", True)]
+
+    def _collection(self, path: str, params: dict | None = None) -> list[dict]:
+        """Follow SoundCloud's linked pagination without placing URLs in the UI."""
+        payload = self._request("GET", path, params=params or {"limit": 200, "linked_partitioning": "true"}).json()
+        items = list(payload.get("collection", payload) if isinstance(payload, dict) else payload)
+        next_url = payload.get("next_href") if isinstance(payload, dict) else None
+        while next_url:
+            response = self.session.get(next_url, headers={"Authorization": f"OAuth {self.access_token}", "Accept": "application/json"}, timeout=25)
+            response.raise_for_status()
+            payload = response.json()
+            items.extend(payload.get("collection", []))
+            next_url = payload.get("next_href")
+        return items
+
+    @staticmethod
+    def _track(item: dict) -> Track:
+        owner = item.get("user", {}).get("username") or item.get("user", {}).get("permalink") or "Unknown artist"
+        return Track(str(item["id"]), item.get("title", "Untitled"), owner, str(item["id"]), None, item,
+                     item.get("created_at"), "single", "library")
+
+    def get_liked_tracks(self) -> list[Track]:
+        likes = self._collection("/me/likes")
+        return [self._track(item["track"]) for item in likes if item.get("track") and item["track"].get("streamable", True)]
+
+    def get_user_playlists(self) -> list[UserPlaylist]:
+        return [UserPlaylist(str(item["id"]), item.get("title", "Untitled playlist"), item)
+                for item in self._collection("/me/playlists")]
+
+    def get_playlist_tracks(self, playlist: UserPlaylist) -> list[Track]:
+        data = self._request("GET", f"/playlists/{playlist.id}").json()
+        return [self._track(item) for item in data.get("tracks", []) if item and item.get("streamable", True)]
 
     def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         payload = {"playlist": {

@@ -6,7 +6,7 @@ import time
 import requests
 import spotipy
 from app.config import settings
-from app.models import Artist, PlaylistResult, Track
+from app.models import Artist, PlaylistResult, Track, UserPlaylist
 from app.services.token_store import TokenStore
 from .base import BaseMusicAdapter
 from .oauth import OAuthCallback, PKCE
@@ -42,7 +42,7 @@ class SpotifyAdapter(BaseMusicAdapter):
         params = {
             "client_id": settings.spotify_client_id, "response_type": "code",
             "redirect_uri": settings.spotify_redirect_uri, "state": state,
-            "scope": "playlist-modify-private playlist-modify-public",
+            "scope": "playlist-modify-private playlist-modify-public user-library-read playlist-read-private",
             "code_challenge_method": "S256", "code_challenge": pkce.challenge,
         }
         log("Opening Spotify authorization in your browser…")
@@ -72,6 +72,8 @@ class SpotifyAdapter(BaseMusicAdapter):
             raise RuntimeError(f"Spotify rate limit reached; retry after {response.headers.get('Retry-After', 'a short wait')} seconds.")
         if response.status_code == 401:
             raise RuntimeError("Spotify session expired; press Login again.")
+        if response.status_code == 403:
+            raise RuntimeError("Spotify has not granted access to this part of your library. Press Login in Settings to grant the updated permissions.")
         response.raise_for_status()
         return response
 
@@ -134,6 +136,42 @@ class SpotifyAdapter(BaseMusicAdapter):
                 if len(found) == limit:
                     return found
         return found
+
+    @staticmethod
+    def _track(item: dict) -> Track:
+        return Track(item["id"], item["name"], ", ".join(a["name"] for a in item.get("artists", [])),
+                     item.get("uri"), item.get("popularity"), item,
+                     item.get("album", {}).get("release_date"), item.get("album", {}).get("album_type"), "library")
+
+    def get_liked_tracks(self) -> list[Track]:
+        tracks: list[Track] = []
+        offset = 0
+        while True:
+            page = self._request("GET", "/me/tracks", params={"limit": 50, "offset": offset}).json()
+            tracks.extend(self._track(item["track"]) for item in page.get("items", []) if item.get("track"))
+            if not page.get("next"):
+                return tracks
+            offset += len(page.get("items", []))
+
+    def get_user_playlists(self) -> list[UserPlaylist]:
+        playlists: list[UserPlaylist] = []
+        offset = 0
+        while True:
+            page = self._request("GET", "/me/playlists", params={"limit": 50, "offset": offset}).json()
+            playlists.extend(UserPlaylist(item["id"], item["name"], item) for item in page.get("items", []) if item)
+            if not page.get("next"):
+                return playlists
+            offset += len(page.get("items", []))
+
+    def get_playlist_tracks(self, playlist: UserPlaylist) -> list[Track]:
+        tracks: list[Track] = []
+        offset = 0
+        while True:
+            page = self._request("GET", f"/playlists/{playlist.id}/items", params={"limit": 50, "offset": offset}).json()
+            tracks.extend(self._track(item["item"]) for item in page.get("items", []) if item.get("item", {}).get("type") == "track")
+            if not page.get("next"):
+                return tracks
+            offset += len(page.get("items", []))
 
     def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         playlist = self._request("POST", "/me/playlists", json={"name": name, "public": False, "description": description or "Created by SoundFlix"}).json()

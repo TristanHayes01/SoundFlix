@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import re
 import tidalapi
-from app.models import Artist, PlaylistResult, Track
+from app.models import Artist, PlaylistResult, Track, UserPlaylist
 from app.services.token_store import TokenStore
 from .base import BaseMusicAdapter
 from .oauth import open_default_browser
@@ -106,7 +106,26 @@ class TidalAdapter(BaseMusicAdapter):
             entries = session_method(artist.id, limit=limit)
         else:
             raise RuntimeError("Installed tidalapi lacks an artist top-tracks method; update tidalapi.")
-        return [Track(str(t.id), t.name, artist.name, str(t.id), getattr(t, "popularity", None), t, str(getattr(t, "release_date", "") or ""), None) for t in entries]
+        album_dates: dict[str, object] = {}
+
+        def release_date(track):
+            value = (getattr(track, "release_date", None) or
+                     getattr(getattr(track, "album", None), "release_date", None) or
+                     getattr(getattr(track, "album", None), "available_release_date", None))
+            album_id = str(getattr(getattr(track, "album", None), "id", "") or "")
+            if not value and album_id:
+                if album_id not in album_dates:
+                    try:
+                        album_dates[album_id] = self.session.album(album_id).available_release_date
+                    except Exception:
+                        album_dates[album_id] = None
+                value = album_dates[album_id]
+            return value
+
+        return [Track(
+            str(t.id), t.name, artist.name, str(t.id), getattr(t, "popularity", None), t,
+            str(release_date(t) or ""), None,
+        ) for t in entries]
 
     def get_recent_tracks(self, artist: Artist, limit: int = 5) -> list[Track]:
         """Use the artist's albums and EP/singles, ordered by their release date."""
@@ -133,6 +152,42 @@ class TidalAdapter(BaseMusicAdapter):
                 if len(found) == limit:
                     return found
         return found
+
+    @staticmethod
+    def _track(item) -> Track:
+        artists = getattr(item, "artists", None) or []
+        name = ", ".join(getattr(artist, "name", "") for artist in artists if getattr(artist, "name", None))
+        release_date = getattr(item, "release_date", None) or getattr(getattr(item, "album", None), "release_date", None)
+        return Track(str(item.id), item.name, name or getattr(getattr(item, "artist", None), "name", "Unknown artist"),
+                     str(item.id), getattr(item, "popularity", None), item,
+                     str(release_date or ""), None, "library")
+
+    def get_liked_tracks(self) -> list[Track]:
+        self._require_login()
+        return [self._track(item) for item in self.session.user.favorites.tracks_paginated()]
+
+    def get_user_playlists(self) -> list[UserPlaylist]:
+        self._require_login()
+        # Include personal and favorited playlists, which are the playlists a
+        # listener is most likely to want SoundFlix to inspect.
+        playlists = self.session.user.playlist_and_favorite_playlists(limit=50)
+        output: list[UserPlaylist] = []
+        seen: set[str] = set()
+        for item in playlists:
+            identifier = str(getattr(item, "id", None) or getattr(item, "uuid", ""))
+            if identifier and identifier not in seen:
+                output.append(UserPlaylist(identifier, getattr(item, "name", "Untitled playlist"), item))
+                seen.add(identifier)
+        return output
+
+    def get_playlist_tracks(self, playlist: UserPlaylist) -> list[Track]:
+        self._require_login()
+        raw = playlist.raw
+        tracks_method = getattr(raw, "tracks", None)
+        if not tracks_method:
+            raw = self.session.playlist(playlist.id)
+            tracks_method = raw.tracks
+        return [self._track(item) for item in tracks_method(limit=1000)]
 
     def create_playlist(self, name: str, tracks: list[Track], description: str = "") -> PlaylistResult:
         self._require_login()
