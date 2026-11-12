@@ -24,7 +24,7 @@ try {
     }
 
     & $python -m PyInstaller --noconfirm --clean --log-level WARN --windowed --onedir --name SoundFlix `
-        --collect-all customtkinter --collect-all easyocr --collect-all tidalapi `
+        --collect-all customtkinter --collect-all tidalapi `
         --collect-all spotipy --hidden-import keyring.backends.Windows app/main.py
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller did not finish successfully."

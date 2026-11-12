@@ -25,6 +25,9 @@ Spotify’s PKCE and playlist APIs are documented at [Spotify for Developers](ht
 
 ## Installation
 
+
+### Run from source
+
 1. Install Python 3.11 or later.
 2. Open PowerShell in this directory and run:
 
